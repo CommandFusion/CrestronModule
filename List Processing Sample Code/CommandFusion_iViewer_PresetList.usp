@@ -1,0 +1,150 @@
+/*
+System Name: CommandFusion iViewer List
+Programmer: CommandFusion
+Version: 3.0
+Comments: www.commandfusion.com
+		  for firmware 3.x
+*/
+
+#HELP_BEGIN
+Please refer to the 'CommandFusion iViewer Crestron Module' PDF packaged with the iViewer Crestron sample program.
+The User Guide PDF can also be obtained from our website - http://www.commandfusion.com/downloads
+#HELP_END
+
+#SYMBOL_NAME "CommandFusion iViewer Preset List"
+#CATEGORY "46" "iPhone / iPod Touch" // Custom
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ANALOG_SERIAL_EXPAND InputsWithOutputs
+#DIGITAL_EXPAND InputsWithOutputs
+
+BUFFER_INPUT list_rx$[30];
+DIGITAL_INPUT updateList;
+ANALOG_INPUT listJoin, presetsPerRow, _SKIP_;
+STRING_INPUT preset_name$[99][99], preset_imagePath$[99,99][99];
+
+STRING_OUTPUT list_tx$, _SKIP_, _SKIP_, _SKIP_;
+DIGITAL_OUTPUT updating_list_fb, _SKIP_, _SKIP_, _SKIP_, _SKIP_, preset[99,99];
+
+String Debug[100];
+
+/*
+FUNCTION DebugLogLine(String msg) {
+	if (DebugMode) {
+		Print("\n[%s] %s", TIME(), msg);
+	}
+	Debug = "";
+}
+*/
+
+FUNCTION ProcessCommands(String CommandRequest) {
+    Integer Join, Value, ListItem;
+	String theListJoin[3], CommandType[1], Request[99], Trash[1];
+	
+	Request = CommandRequest;
+
+	if (FIND("=", Request) > 1) {
+		// Remove the 'L'
+		Trash = RemoveByLength(1, Request);
+		// Get the List Join number
+		theListJoin = RemoveByLength(FIND(":", Request) - 1, Request);
+		// Only continue parsing data if its the correct list join for this symbol instance
+		Print("test1\n");
+		if (ATOI(theListJoin) = listJoin) {
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get the List Item number
+			ListItem = ATOI(RemoveByLength(FIND(":", Request) - 1, Request));
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get command type (d, a, s)
+			CommandType = RemoveByLength(1, Request);
+			// Get join number
+			Join = ATOI(RemoveByLength(FIND("=", Request) - 1, Request));
+			// Remove the equals sign
+			Trash = RemoveByLength(1, Request);
+			// use remaining response as value
+			// Remove end of message delimeter
+			if (RIGHT(Request, 1) = "\x03") {
+				Value = ATOI(Left(Request, LEN(Request) - 1));
+			} else {
+				Value = ATOI(Request);
+			}
+			Print("test\n");
+	
+			// Disguard zero joins
+			if (Join > 0) {
+				//Print("\nCommandType: %s, Join: %d, Value: %s", CommandType, ATOI(Join), Value);
+				if(CompareStrings(CommandType, "d") = 0) {
+					
+					PULSE(100, preset[(ListItem * presetsPerRow) + Join]);
+				}
+			}
+		}
+	}
+}
+
+PUSH updateList {
+	INTEGER index, Value, i, j;
+	STRING updateMsg[9999];
+
+    updateMsg = "l" + ITOA(listJoin) + "=0x\x03l" + ITOA(listJoin) + "=";
+	FOR (i = 1 TO 99 STEP presetsPerRow) {
+		if (i + presetsPerRow > 99) {
+			break;
+		}
+		if (preset_name$[i] <> "" || preset_imagePath$[i]<> "") {
+
+			updateMsg = updateMsg + ITOA((i/presetsPerRow)) + "c";
+			FOR(j = 0 TO presetsPerRow - 1) {
+				if (preset_name$[i + j] != "") {
+					updateMsg = updateMsg + "\x1Es" + ITOA((j*2) + 1) + "=" + preset_name$[i + j];
+				}
+				if (preset_imagePath$[i + j] != "") {
+					updateMsg = updateMsg + "\x1Es" + ITOA((j*2) + 2) + "=" + preset_imagePath$[i + j];
+				}
+			}
+			updateMsg = updateMsg + "\x0D";
+		}
+	}
+	updateMsg = updateMsg + "\x03";
+	updating_list_fb = 1;
+	While(LEN(updateMsg) > 200) {
+		list_tx$ = REMOVEBYLENGTH(200, updateMsg);
+	}
+	if (LEN(updateMsg) <> 0) {
+		list_tx$ = updateMsg;
+	}
+	updating_list_fb = 0;
+}
+
+CHANGE list_rx$ {
+	STRING msgReceived[999], temp[999], trash$[10];
+	INTEGER index;
+
+	if (FIND("\x03",list_rx$) > 0) {
+		//DebugLogLine("Found EOM character - Parsing data");
+		msgReceived = msgReceived + list_rx$;
+		ClearBuffer(list_rx$);
+	
+		Print("iViewer List Received: %s\n", msgReceived);
+		//DebugLogLine(Debug);
+	
+		While (LEN(msgReceived) > 0) {
+			index = FIND("\x03", msgReceived);
+			if (index > 1) {
+				temp = RemoveByLength(index - 1, msgReceived);
+				//Debug = "Parsed data: " + temp;
+				//DebugLogLine(Debug);
+				trash$ = RemoveByLength(1, msgReceived);
+				if (LEFT(temp, 1) = "l") {
+					ProcessCommands(temp);
+				}
+			} else if (index = 1 && LEN(msgReceived) > 1) {
+				trash$ = RemoveByLength(1, msgReceived);
+			} else {
+				break;
+			}
+		}
+	}
+}

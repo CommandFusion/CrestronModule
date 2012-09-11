@@ -1,0 +1,436 @@
+/*
+System Name: CommandFusion iViewer Server
+Programmer: CommandFusion
+Version: 4.5
+Comments:  www.commandfusion.com
+*/
+
+#HELP_BEGIN
+Please refer to the 'CommandFusion iViewer Crestron Module' PDF packaged with the iViewer Crestron sample program.
+The User Guide PDF can also be obtained from our website - http://www.commandfusion.com/downloads
+#HELP_END
+
+#SYMBOL_NAME "CommandFusion iViewer Server v4.5"
+#CATEGORY "46" "iPhone / iPod Touch" // Custom
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ANALOG_SERIAL_EXPAND InputsWithOutputs
+#DIGITAL_EXPAND InputsWithOutputs
+#ENABLE_TRACE
+
+#DEFINE_CONSTANT NUMDIGITAL 1000    // Max size inputs/outputs can be expanded to. Use as few as possible to reduce memory usage
+#DEFINE_CONSTANT NUMANALOG 99       // Max size inputs/outputs can be expanded to. Use as few as possible to reduce memory usage
+#DEFINE_CONSTANT NUMSERIAL 99       // Max size inputs/outputs can be expanded to. Use as few as possible to reduce memory usage
+#DEFINE_CONSTANT STRINGLEN 240
+#DEFINE_CONSTANT SOCKETLEN 9999
+#DEFINE_CONSTANT MAXDIGITALLEN 8  // d####=#\x03
+#DEFINE_CONSTANT MAXANALOGLEN 12  // a####=#####\x03
+#DEFINE_CONSTANT MAXSTRINGLEN 247 // s####=STRINGLEN\x03
+
+BUFFER_INPUT _SKIP_, _SKIP_, _SKIP_, list_tx$[255];
+DIGITAL_INPUT _SKIP_, _SKIP_, _SKIP_, RequestVersion, UpdatingList,  SystemBarToggle, SystemBarShow, SystemBarHide, DebugMode, EnableConnections, _SKIP_, fb[NUMDIGITAL, 1];
+ANALOG_INPUT _SKIP_, _SKIP_, an_fb[NUMANALOG, 1], _SKIP_;
+STRING_INPUT text_o[NUMSERIAL, 1][STRINGLEN];
+              
+STRING_OUTPUT iViewerVersion, ConnectedDeviceID, PageName, list_rx$;
+DIGITAL_OUTPUT _SKIP_, _SKIP_, _SKIP_, PortraitMode, LandscapeMode, _SKIP_, ReceivedData, ActivityTimeout, _SKIP_, Offline, _SKIP_, press[NUMDIGITAL, 1];
+ANALOG_OUTPUT CommandSocketStatus, _SKIP_;
+ANALOG_OUTPUT an_act[NUMANALOG, 1],_SKIP_;
+STRING_OUTPUT text_i[NUMSERIAL, 1];
+
+STRING_PARAMETER Password$[20];
+INTEGER_PARAMETER Port, ActivityTimeoutAmount;
+
+#BEGIN_PARAMETER_PROPERTIES Port
+	propValidUnits=unitDecimal;
+	propShortDescription= "Port for handling communication with the iViewer.";
+#END_PARAMETER_PROPERTIES
+#BEGIN_PARAMETER_PROPERTIES ActivityTimeoutAmount
+	propValidUnits=unitDecimal;
+	propShortDescription= "Time in seconds to wait before closing a connection due to no activity.";
+#END_PARAMETER_PROPERTIES
+#BEGIN_PARAMETER_PROPERTIES Password$
+	propValidUnits=unitString;
+	propDefaultValue="na";
+	propShortDescription="Access password (enter 'na' without quotes for blank password)";
+#END_PARAMETER_PROPERTIES
+
+TCP_SERVER CommandServer[SOCKETLEN];
+
+String Debug[999], text_o_store[NUMSERIAL][STRINGLEN];
+Integer AccessGranted, Processing; 
+INTEGER Semaphore;
+
+FUNCTION DebugLogLine(String msg) {
+	if (DebugMode) {
+		Print("\n[%s] %s", TIME(), msg);
+	}
+	Debug = "";
+}
+
+FUNCTION SendFeedback(STRING theMsg, INTEGER containsListData) {
+	SIGNED_INTEGER status;
+
+	// Wait for any list data being sent to finish sending so we dont interrupt it
+	// (list data can be quite long and require sending a few packets)
+	while (UpdatingList && !containsListData || Processing) {
+		ProcessLogic();
+	}
+	
+	Processing = 1;
+
+	if (CommandServer.SocketStatus = 2) {
+		status = SocketSend(CommandServer, theMsg);
+		if (DebugMode) {
+			Debug = "SEND: " + theMsg;
+			DebugLogLine(Debug);
+			if (status < 0) {
+				Debug = "Error sending to iViewer: " + ITOA(status);
+				DebugLogLine(Debug);
+			}
+		}
+	} else if (DebugMode) {
+		Trace("Cannot send when socket status = %d", CommandServer.SocketStatus);
+	}
+	
+	Processing = 0;
+}
+
+Function InitializeFeedback() {
+	STRING Response[SOCKETLEN];
+	INTEGER i, count;
+    
+    count = 0;
+	// Digital
+	for (i=1 to GetNumArrayCols(fb)) {
+		if (IsSignalDefined(fb[i])) {
+			if (fb[i]) {
+				if (count + MAXDIGITALLEN > SOCKETLEN){
+					SendFeedback(Response, 0);
+					Response = "";
+					count = 0;
+				}
+				Response = Response + "d" + ITOA(i) + "=" + ITOA(fb[i]) + "\x03";
+				count = len(Response);
+			}
+		}
+	}
+    // Analog
+	for (i=1 to GetNumArrayCols(an_fb)) {
+		if (IsSignalDefined(an_fb[i])) {
+			if (an_fb[i]) {
+				if (count + MAXANALOGLEN > SOCKETLEN) {
+					SendFeedback(Response, 0);
+					Response = "";
+					count = 0;
+				}
+				Response = Response + "a" + ITOA(i) + "=" + ITOA(an_fb[i]) + "\x03";
+				count = len(Response);
+			}
+		}
+	}
+    // Serial
+	for (i=1 to GetNumArrayCols(text_o)) {
+		if (IsSignalDefined(text_o[i])) {
+			if (text_o_store[i] <> "") { 
+				if (count + MAXSTRINGLEN > SOCKETLEN) {
+					SendFeedback(Response, 0);
+					Response = "";
+					count = 0;
+				}	
+				Response = Response + "s" + ITOA(i) + "=" + text_o_store[i] + "\x03"; 
+				count = len(response);
+			}
+		}
+	}  
+	if (count + 24 > SOCKETLEN) {
+		SendFeedback(Response, 0);
+		Response = "";
+		count = 0;
+	}
+    if (SystemBarToggle) {
+		Response = Response + "d17922=1\x03";
+	}
+	if (SystemBarShow) {
+		Response = Response + "d17931=1\x03";
+	}
+	if (SystemBarHide) {
+		Response = Response + "d17932=0\x03";
+	}
+	SendFeedback(Response, 0);
+	Response = "";
+}
+
+FUNCTION ProcessCommands(String CommandRequest) {
+	
+	String Response[1024], CommandType[1], Join[10], Value[255], Request[1024], Trash[1];
+            	
+	Request = CommandRequest;
+
+	// Get command type (d, a, s, etc)
+	CommandType = RemoveByLength(1, Request);
+	if (CommandType = "i") {
+		if (AccessGranted) {
+			// Initialize request
+			InitializeFeedback();
+			// use remaining response as value
+			Value = RemoveByLength(LEN(Request), Request);
+		}
+	} else if (CommandType = "h") {
+		if (DebugMode) {
+			Trace("Heartbeat. (Port: %u)",port);
+		}
+		// Heartbeat message
+		// Remove the equals sign
+		Trash = RemoveByLength(1, Request);
+		// use remaining response as value
+		Value = RemoveByLength(LEN(Request), Request);
+		if (Value = "0") {
+			Response = "h=1\x03";
+			SendFeedback(Response, 0);
+		}
+	} else if (CommandType = "p") {
+		// Password received
+		// Remove the equals sign
+		Trash = RemoveByLength(1, Request);
+		// use remaining response as value
+		AccessGranted = 0;
+		// Check for empty passwords
+		if (len(Request)) 
+		{
+			Value = RemoveByLength(LEN(Request), Request);
+		} 
+		else 
+		{
+			Value = "";
+		}
+	        
+		if (Password$ = Value || Password$ = "na") {
+			Response = "p=ok\x03";
+			InitializeFeedback();
+			AccessGranted = 1;
+		} else {
+			Response = "p=bad\x03";
+		}
+		SendFeedback(Response, 0);
+	} 
+	else if (CommandType = "m") {
+		// Orientation change
+		// Remove the equals sign
+		Trash = RemoveByLength(1, Request);
+		// use remaining response as value
+		Value = RemoveByLength(LEN(Request), Request);
+		if (Value = "portrait") {
+			LandscapeMode = 0;
+			PortraitMode = 1;
+		} else if (Value = "landscape") {
+			PortraitMode = 0;
+			LandscapeMode = 1;
+		}
+	} else if (CommandType = "n") {
+		// Page change
+		// Remove the equals sign
+		Trash = RemoveByLength(1, Request);
+		// use remaining response as value
+		Value = RemoveByLength(LEN(Request), Request);
+		PageName = Value;
+	} else if (CommandType = "l") {
+		// Received list data
+		list_rx$ = "l" + Request + "\x03";
+	} else if (FIND("=", Request) > 1) {
+		if (AccessGranted) 
+		{
+			// Get join number
+			Join = RemoveByLength(FIND("=", Request) - 1, Request);
+			// Remove the equals sign
+			Trash = RemoveByLength(1, Request);
+			// use remaining response as value
+			Value = Request;
+			// Remove end of message delimeter
+			if (RIGHT(Value, 1) = "\x03") 
+			{
+				Value = Left(Value, LEN(Value) - 1);
+			}
+	
+			// Disguard zero joins
+			if (ATOI(Join) > 0) {
+				//Print("\nCommandType: %s, Join: %d, Value: %s", CommandType, ATOI(Join), Value);
+				if (CompareStrings(LEFT(CommandType, 1), "d") = 0) {
+					if (IsSignalDefined(press[ATOI(Join)])) 
+					{
+						press[ATOI(Join)] = ATOI(Value);
+					}
+					Debug = "Digital " + Join + ": " + Value;
+					DebugLogLine(Debug);
+				} else if (CompareStrings(CommandType, "a") = 0) {
+					if (IsSignalDefined(an_act[ATOI(Join)])) {
+						an_act[ATOI(Join)] = ATOI(Value);
+					}
+					Debug = "Analog " + Join + ": " + Value;
+					DebugLogLine(Debug);
+				} else if (CompareStrings(CommandType, "s") = 0) {
+					if (IsSignalDefined(text_i[ATOI(Join)])) {
+						text_i[ATOI(Join)] = Value;
+					}
+					// Reserved join for iViewer version number on client
+					if (ATOI(Join) = 10001) {
+						iViewerVersion = value;
+					}
+					// Reserved join for client Device ID
+					if (ATOI(Join) = 10002) {
+						ConnectedDeviceID = value;
+					}
+					Debug = "Serial " + Join + ": " + Value;
+					DebugLogLine(Debug);
+				} else if (DebugMode) {
+					DebugLogLine("Couldn't match the command");
+					DebugLogLine(CommandRequest);    
+				}
+			}
+		}
+	}
+}
+
+PUSH RequestVersion {
+	SendFeedback("d10001=1", 0);
+	SendFeedback("d10001=0", 0);
+}
+
+CHANGE fb {
+	INTEGER index;
+	STRING Response[255];
+
+	index = GetLastModifiedArrayIndex();
+   	Response = "d" + ITOA(index) + "=" + ITOA(fb[index]) + "\x03";
+   	
+	SendFeedback(Response, 0);
+}
+
+CHANGE an_fb {
+	INTEGER index, Value;
+	STRING Response[255];
+
+	index = GetLastModifiedArrayIndex();
+	Value = an_fb[index];
+	Response = "a" + ITOA(index) + "=" + ITOA(Value) + "\x03";
+	
+	SendFeedback(Response, 0);
+}
+
+CHANGE text_o {
+    INTEGER index;
+    STRING Response[255];
+
+    index = GetLastModifiedArrayIndex();
+    if (text_o[index] = "") {
+        Response = "s" + ITOA(index) + "= \x03";
+        text_o_store[index] = " ";
+    } else {
+        While (len(text_o[index]) > MAXSTRINGLEN) {
+        	Response = "s" + ITOA(index) + "=" + GatherByLength(80, text_o[index]) + "\x03";
+        	SendFeedback(Response, 0);
+        }
+        Response = "s" + ITOA(index) + "=" + text_o[index] + "\x03";
+        text_o_store[index] = text_o[index];
+    }
+    SendFeedback(Response, 0);
+}
+
+CHANGE list_tx$ {
+	STRING command[50];
+	if (Semaphore = 0) {
+		Semaphore = 1;
+	  	while (find("\x03", list_tx$) <> 0) {              
+	  		command = Remove("\x03", list_tx$);
+			SendFeedback(command, 1);
+		}
+		Semaphore = 0;
+	}
+}
+
+PUSH EnableConnections {
+	SIGNED_INTEGER status;
+	DebugLogLine("iViewer Connections Enabled");
+	AccessGranted = 0;
+	//Trace("\nPort: %i", Port);
+	if (Port > 1) {
+		// Start server listening
+		status = SocketServerStartListen(CommandServer, "0.0.0.0", Port);
+		if (status < 0) {
+			Print("Error listening to 0.0.0.0 on port %u (status: %d)", port, status);
+		}
+	}
+}
+
+RELEASE EnableConnections {
+	DebugLogLine("iViewer Connections Disabled");
+
+	// Stop client handler server listening
+	SocketServerStopListen(CommandServer);
+	Offline = 1;
+}
+
+PUSH SystemBarToggle {
+	SendFeedback("d17922=1\x03", 0);
+}
+
+PUSH SystemBarShow {
+	SendFeedback("d17931=1\x03", 0);
+}
+
+PUSH SystemBarHide {
+	SendFeedback("d17932=0\x03", 0);
+}
+
+// CONNECTIONS
+SOCKETCONNECT CommandServer {
+	DebugLogLine("iViewer connected");  
+	Offline = 0;
+	WAIT(ActivityTimeoutAmount * 100, ActivityWatcher) {
+		PULSE(50, ActivityTimeout);
+		if (Offline = 0) {
+			Offline = 1;
+		}
+	}
+}
+
+SOCKETDISCONNECT CommandServer {
+	SIGNED_INTEGER status;
+	Integer i;
+    
+    Offline = 1;
+    
+	CANCELWAIT(ActivityWatcher);
+
+	DebugLogLine("iViewer disconnected");
+	AccessGranted = 0;
+
+	// Force all digital outputs low, safeguard against held buttons (volume ramping etc, after disconnecting)
+	for (i=1 to GetNumArrayCols(press)) {
+		if (IsSignalDefined(press[i])) {
+			press[i] = 0;
+		}
+	}
+}
+
+SOCKETSTATUS CommandServer {
+    CommandSocketStatus = SocketGetStatus();
+}
+
+
+Function Main() {
+	STRING temp[255];
+	AccessGranted = 0;
+	Offline = 1;
+	
+	WHILE (1) {
+		temp = gather("\x03",CommandServer.SocketRxBuf);
+		debugLogLine("new command gathered");
+		RETIMEWAIT(ActivityTimeoutAmount * 100, ActivityWatcher);
+		temp = left(temp, Len(temp) - 1);
+		if (len(temp) > 0) {
+			ProcessCommands(temp);
+		}
+		delay(5);
+	}
+}

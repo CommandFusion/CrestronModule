@@ -1,0 +1,215 @@
+/*
+System Name: CommandFusion iViewer List
+Programmer: CommandFusion
+Version: 3.0
+Comments: www.commandfusion.com
+		  for firmware 3.x
+*/
+
+#HELP_BEGIN
+Please refer to the 'CommandFusion iViewer Crestron Module' PDF packaged with the iViewer Crestron sample program.
+The User Guide PDF can also be obtained from our website - http://www.commandfusion.com/downloads
+#HELP_END
+
+#SYMBOL_NAME "CommandFusion iViewer List Parser v3.0 - ANALOG JOINS"
+#CATEGORY "46" "iPhone / iPod Touch" // Custom
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ANALOG_SERIAL_EXPAND InputsWithOutputs
+#DIGITAL_EXPAND InputsWithOutputs
+             
+BUFFER_INPUT list_rx$[10];
+ANALOG_INPUT listJoin, digitalPerItem, analogPerItem, serialPerItem, _SKIP_, an_fb[999], _SKIP_;
+STRING_INPUT text_o[999, 1][255];
+              
+DIGITAL_OUTPUT _SKIP_, _SKIP_, _SKIP_, press[9999, 10];
+STRING_OUTPUT _SKIP_, tx$;
+ANALOG_OUTPUT _SKIP_, _SKIP_, _SKIP_, _SKIP_, _SKIP_, an_act[999], _SKIP_;
+STRING_OUTPUT text_i[999, 1];
+
+String Debug[9999];
+
+FUNCTION DebugLogLine(String msg) {
+	if (DebugMode) {
+		Print("\n[%s] %s", TIME(), msg);
+	}
+	Debug = "";
+}
+
+String_Function InitializeFeedback() {
+	STRING Response[9999], Temp[999];
+	INTEGER i;
+
+	// Get status of each join
+
+	// Digital
+	for (i=1 to GetNumArrayCols(fb)) {
+		if (IsSignalDefined(fb[i])) {
+			if (fb[i]) {
+				Response = Response + "l" + ITOA(listJoin) + ":" + ITOA(i/digitalPerItem) + ":d" + ITOA(i) + "=" + ITOA(fb[i]) + "\x03";
+			}
+		}
+	}
+    // Analog
+	for (i=1 to GetNumArrayCols(an_fb)) {
+		if (IsSignalDefined(an_fb[i])) {
+			if (an_fb[i]) {
+				Response = Response + "l" + ITOA(listJoin) + ":" + ITOA(i/analogPerItem) + ":a" + ITOA(i) + "=" + ITOA(an_fb[i]) + "\x03";
+			}
+		}
+	}
+    // Serial
+	for (i=1 to GetNumArrayCols(text_o)) {
+		if (IsSignalDefined(text_o[i])) {
+			if (text_o[i] <> "") {
+				Response = Response + "l" + ITOA(listJoin) + ":" + ITOA(i/serialPerItem) + ":s" + ITOA(i) + "=" + text_o[i] + "\x03";
+			}
+		}
+	}
+
+	Return (Response);
+}
+
+FUNCTION SendFeedback(STRING theMsg) {
+	SIGNED_INTEGER status;
+	//Debug = "Sending: " + theMsg;
+    //DebugLogLine(Debug);
+	tx$ = theMsg;
+}
+
+FUNCTION ProcessCommands(String CommandRequest) {
+    Integer JoinVal;                                                                            
+	String Response[9999], theListJoin[10], ListItem[10], CommandType[1], Join[10], Value[255], Request[9999], Trash[1];
+	
+	Request = CommandRequest;
+
+	if (FIND("=", Request) > 1) {
+		// Remove the 'L'
+		Trash = RemoveByLength(1, Request);
+		// Get the List Join number
+		theListJoin = RemoveByLength(FIND(":", Request) - 1, Request);
+		// Only continue parsing data if its the correct list join for this symbol instance
+		if (ATOI(theListJoin) = listJoin) {
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get the List Item number
+			ListItem = RemoveByLength(FIND(":", Request) - 1, Request);
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get command type (d, a, s)
+			CommandType = RemoveByLength(1, Request);
+			// Get join number
+			Join = RemoveByLength(FIND("=", Request) - 1, Request);
+			// Remove the equals sign
+			Trash = RemoveByLength(1, Request);
+			// use remaining response as value
+			Value = Request;
+			// Remove end of message delimeter
+			if (RIGHT(Value, 1) = "\x03") {
+				Value = Left(Value, LEN(Value) - 1);
+			}
+	
+			// Disguard zero joins
+			if (ATOI(Join) > 0) {
+				//Print("\nCommandType: %s, Join: %d, Value: %s", CommandType, ATOI(Join), Value);
+				if(CompareStrings(LEFT(CommandType, 1), "d") = 0) {
+					JoinVal = ATOI(Join) + (ATOI(ListItem) * digitalPerItem);
+					Debug = "Digital List " + ITOA(JoinVal) + ": " + Value;
+					DebugLogLine(Debug);
+					if (IsSignalDefined(press[JoinVal])) {
+						press[JoinVal] = ATOI(Value);
+					}
+				} else if(CompareStrings(CommandType, "a") = 0) {
+					JoinVal = ATOI(Join) + (ATOI(ListItem) * analogPerItem);
+					Debug = "Analog List " + ITOA(JoinVal) + ": " + Value;
+					DebugLogLine(Debug);
+		
+					if (IsSignalDefined(an_act[JoinVal])) {
+						an_act[JoinVal] = ATOI(Value);
+					}
+				} else if(CompareStrings(CommandType, "s") = 0) {
+					JoinVal = ATOI(Join) + (ATOI(ListItem) * serialPerItem);
+					Debug = "Serial List " + ITOA(JoinVal) + ": " + Value;
+					DebugLogLine(Debug);
+		
+					if (IsSignalDefined(text_i[JoinVal])) {
+						text_i[JoinVal] = Value;
+					}
+				} else {
+					DebugLogLine("Couldn't match the list command");
+				}
+			}
+		}
+	}
+}
+
+CHANGE fb {
+	INTEGER index;
+	STRING Response[2000];
+
+	index = GetLastModifiedArrayIndex();
+   	Response = "l" + ITOA(listJoin) + ":" + ITOA((index - 1)/digitalPerItem) + ":d" + ITOA(((index - 1) mod digitalPerItem) + 1) + "=" + ITOA(fb[index]) + "\x03";
+	SendFeedback(Response);
+}
+
+CHANGE an_fb {
+	INTEGER index, Value;
+	STRING Response[2000];
+
+	index = GetLastModifiedArrayIndex();
+	Value = an_fb[index];
+	Response = "l" + ITOA(listJoin) + ":" + ITOA((index - 1)/analogPerItem) + ":a" + ITOA(((index - 1) mod analogPerItem) + 1) + "=" + ITOA(Value) + "\x03";
+	SendFeedback(Response);
+}
+
+CHANGE text_o {
+	INTEGER index;
+	STRING Response[2000];
+
+	index = GetLastModifiedArrayIndex();
+	if (text_o[index] = "\xFE") {
+		Response = "l" + ITOA(listJoin) + ":" + ITOA((index - 1)/serialPerItem) + ":s" + ITOA(((index - 1) mod serialPerItem) + 1) + "=\x03";
+	} else {
+		Response = "l" + ITOA(listJoin) + ":" + ITOA((index - 1)/serialPerItem) + ":s" + ITOA(((index - 1) mod serialPerItem) + 1) + "=" + text_o[index] + "\x03";	 
+	}
+	SendFeedback(Response);
+}
+
+CHANGE list_rx$ {
+	STRING msgReceived[9999], temp[9999], trash$[10];
+	INTEGER index;
+
+	if (FIND("\x03",list_rx$) > 0) {
+		//DebugLogLine("Found EOM character - Parsing data");
+		msgReceived = msgReceived + list_rx$;
+		ClearBuffer(list_rx$);
+	
+		Debug = "iViewer List Received: " + msgReceived;
+		DebugLogLine(Debug);
+	
+		While (LEN(msgReceived) > 0) {
+			index = FIND("\x03", msgReceived);
+			if (index > 1) {
+				temp = RemoveByLength(index - 1, msgReceived);
+				//Debug = "Parsed data: " + temp;
+				//DebugLogLine(Debug);
+				trash$ = RemoveByLength(1, msgReceived);
+				if (LEFT(temp, 1) = "l") {
+					ProcessCommands(temp);
+				}
+			} else if (index = 1 && LEN(msgReceived) > 1) {
+				trash$ = RemoveByLength(1, msgReceived);
+			} else {
+				break;
+			}
+		}
+	}
+}
+
+
+Function Main() {
+	if (WaitForInitializationComplete() < 0) {
+		DebugLogLine("Error waiting for initialization complete");
+		return;
+	}
+}

@@ -1,0 +1,161 @@
+/*
+System Name: CommandFusion iViewer List
+Programmer: CommandFusion
+Version: 3.0
+Comments: www.commandfusion.com
+		  for firmware 3.x
+*/
+
+#HELP_BEGIN
+Please refer to the 'CommandFusion iViewer Crestron Module' PDF packaged with the iViewer Crestron sample program.
+The User Guide PDF can also be obtained from our website - http://www.commandfusion.com/downloads
+#HELP_END
+
+#SYMBOL_NAME "CommandFusion iViewer List Parser v3.0 - ANALOG JOINS"
+#CATEGORY "46" "iPhone / iPod Touch" // Custom
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ANALOG_SERIAL_EXPAND InputsWithOutputs
+#DIGITAL_EXPAND InputsWithOutputs
+
+BUFFER_INPUT list_rx$[10];
+ANALOG_INPUT listJoin, itemNumber_fb, header_fb[9], title_fb[9], content_fb[9], footer_fb[9,9];
+
+STRING_OUTPUT list_tx$, _SKIP_;
+ANALOG_OUTPUT itemNumber_act, header_act[9], title_act[9], content_act[9], footer_act[9,9];
+
+String Debug[100];
+
+/*
+FUNCTION DebugLogLine(String msg) {
+	if (DebugMode) {
+		Print("\n[%s] %s", TIME(), msg);
+	}
+	Debug = "";
+}
+*/
+FUNCTION ProcessCommands(String CommandRequest) {
+    Integer Join;                                                                            
+	String Response[999], theListJoin[10], ListItem[10], CommandType[1], Value[255], Request[999], Trash[1];
+	
+	Request = CommandRequest;
+
+	if (FIND("=", Request) > 1) {
+		// Remove the 'L'
+		Trash = RemoveByLength(1, Request);
+		// Get the List Join number
+		theListJoin = RemoveByLength(FIND(":", Request) - 1, Request);
+		// Only continue parsing data if its the correct list join for this symbol instance
+		if (ATOI(theListJoin) = listJoin) {
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get the List Item number
+			itemNumber_act = ATOI(RemoveByLength(FIND(":", Request) - 1, Request));
+			// Remove the ':'
+			Trash = RemoveByLength(1, Request);
+			// Get command type (d, a, s)
+			CommandType = RemoveByLength(1, Request);
+			// Get join number
+			Join = ATOI(RemoveByLength(FIND("=", Request) - 1, Request));
+			// Remove the equals sign
+			Trash = RemoveByLength(1, Request);
+			// use remaining response as value
+			Value = Request;
+			// Remove end of message delimeter
+			if (RIGHT(Value, 1) = "\x03") {
+				Value = Left(Value, LEN(Value) - 1);
+			}
+	
+			// Disguard zero joins
+			if (Join > 0) {
+				//Print("\nCommandType: %s, Join: %d, Value: %s", CommandType, ATOI(Join), Value);
+				if(CompareStrings(CommandType, "a") = 0) {
+					if (Join <= 10) {
+						if (isSignalDefined(header_act[Join - 1])) {
+                    		// Header join
+							header_act[Join - 1] = ATOI(Value);
+						}
+					} else if (Join <= 20) {
+						if (isSignalDefined(title_act[20 - Join])) {
+							// Title join
+							title_act[20 - Join] = ATOI(Value);
+						}
+					} else if (Join <= 30) {
+						if (isSignalDefined(content_act[30 - Join])) {
+							// Content join
+							content_act[30 - Join] = ATOI(Value);
+						}
+					} else if (Join <= 40) {
+						if (isSignalDefined(footer_act[40 - Join])) {
+							// Footer join
+							footer_act[40 - Join] = ATOI(Value);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+CHANGE header_fb {
+	INTEGER index, Value;
+
+	index = GetLastModifiedArrayIndex();
+	Value = header_fb[index];
+	list_tx$ = "l" + ITOA(listJoin) + ":" + ITOA(itemNumber_fb) + ":a" + ITOA(index + 1) + "=" + ITOA(Value) + "\x03";
+}
+
+CHANGE title_fb {
+	INTEGER index, Value;
+
+	index = GetLastModifiedArrayIndex();
+	Value = title_fb[index];
+	list_tx$ = "l" + ITOA(listJoin) + ":" + ITOA(itemNumber_fb) + ":a" + ITOA(index + 11) + "=" + ITOA(Value) + "\x03";
+}
+
+CHANGE content_fb {
+	INTEGER index, Value;
+
+	index = GetLastModifiedArrayIndex();
+	Value = content_fb[index];
+	list_tx$ = "l" + ITOA(listJoin) + ":" + ITOA(itemNumber_fb) + ":a" + ITOA(index + 21) + "=" + ITOA(Value) + "\x03";
+}
+
+CHANGE footer_fb {
+	INTEGER index, Value;
+
+	index = GetLastModifiedArrayIndex();
+	Value = footer_fb[index];
+	list_tx$ = "l" + ITOA(listJoin) + ":" + ITOA(itemNumber_fb) + ":a" + ITOA(index + 31) + "=" + ITOA(Value) + "\x03";
+}
+
+CHANGE list_rx$ {
+	STRING msgReceived[999], temp[999], trash$[10];
+	INTEGER index;
+
+	if (FIND("\x03",list_rx$) > 0) {
+		//DebugLogLine("Found EOM character - Parsing data");
+		msgReceived = msgReceived + list_rx$;
+		ClearBuffer(list_rx$);
+	
+		//Debug = "iViewer List Received: " + msgReceived;
+		//DebugLogLine(Debug);
+	
+		While (LEN(msgReceived) > 0) {
+			index = FIND("\x03", msgReceived);
+			if (index > 1) {
+				temp = RemoveByLength(index - 1, msgReceived);
+				//Debug = "Parsed data: " + temp;
+				//DebugLogLine(Debug);
+				trash$ = RemoveByLength(1, msgReceived);
+				if (LEFT(temp, 1) = "l") {
+					ProcessCommands(temp);
+				}
+			} else if (index = 1 && LEN(msgReceived) > 1) {
+				trash$ = RemoveByLength(1, msgReceived);
+			} else {
+				break;
+			}
+		}
+	}
+}
